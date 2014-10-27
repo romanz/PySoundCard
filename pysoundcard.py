@@ -294,18 +294,21 @@ class _StreamBase(object):
     """Base class for Stream, InputStream and OutputStream."""
 
     def __init__(self, stream_parameters_in, stream_parameters_out,
-                 samplerate, blocksize, finished_callback, **flags):
+                 samplerate, blocksize, finished_callback,
+                 clip_off=False, dither_off=False,
+                 never_drop_input=False,
+                 prime_output_buffers_using_stream_callback=False):
         if blocksize is None:
             blocksize = init.blocksize
 
         stream_flags = 0x0
-        if 'no_clipping' in flags:
+        if clip_off:
             stream_flags |= 0x00000001
-        if 'no_dithering' in flags:
+        if dither_off:
             stream_flags |= 0x00000002
-        if 'never_drop_input' in flags and flags['never_drop_input']:
+        if never_drop_input:
             stream_flags |= 0x00000004
-        if 'prime_output_buffers_using_callback' in flags:
+        if prime_output_buffers_using_stream_callback:
             stream_flags |= 0x00000008
 
         self._stream = ffi.new("PaStream**")
