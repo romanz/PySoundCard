@@ -553,8 +553,10 @@ def _setup_stream_parameters(kind, device, channels, dtype, latency,
     info = device_info(device)
     if channels is None:
         channels = info['max_' + kind + '_channels']
-    if latency is None:
+    if latency in (None, 'low'):
         latency = info['default_low_' + kind + '_latency']
+    elif latency == 'high':
+        latency = info['default_high_' + kind + '_latency']
     dtype = np.dtype(dtype)
     try:
         sample_format = _np2pa[dtype]
