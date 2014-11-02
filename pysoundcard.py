@@ -295,11 +295,20 @@ class _StreamBase(object):
 
     def __init__(self, stream_parameters_in, stream_parameters_out,
                  samplerate, blocksize, finished_callback,
-                 clip_off=False, dither_off=False,
-                 never_drop_input=False,
-                 prime_output_buffers_using_stream_callback=False):
+                 clip_off=None, dither_off=None,
+                 never_drop_input=None,
+                 prime_output_buffers_using_stream_callback=None):
         if blocksize is None:
             blocksize = init.blocksize
+        if clip_off is None:
+            clip_off = init.clip_off
+        if dither_off is None:
+            dither_off = init.dither_off
+        if never_drop_input is None:
+            never_drop_input = init.never_drop_input
+        if prime_output_buffers_using_stream_callback is None:
+            prime_output_buffers_using_stream_callback = \
+                init.prime_output_buffers_using_stream_callback
 
         stream_flags = 0x0
         if clip_off:
@@ -552,11 +561,22 @@ def _setup_stream_parameters(kind, device, channels, dtype, latency,
     assert kind in ('input', 'output')
 
     if device is None:
+        device = getattr(init, kind + '_device')
+    if channels is None:
+        channels = getattr(init, kind + '_channels')
+    if dtype is None:
+        dtype = getattr(init, kind + '_dtype')
+    if latency is None:
+        latency = getattr(init, kind + '_latency')
+    if samplerate is None:
+        samplerate = init.samplerate
+
+    if device is None:
         device = globals()['default_' + kind + '_device']()
     info = device_info(device)
     if channels is None:
         channels = info['max_' + kind + '_channels']
-    if latency in (None, 'low'):
+    if latency == 'low':
         latency = info['default_low_' + kind + '_latency']
     elif latency == 'high':
         latency = info['default_high_' + kind + '_latency']
@@ -614,11 +634,11 @@ class Stream(_StreamBase, _Reader, _Writer):
 
     """
 
-    def __init__(self, samplerate=None, blocksize=0,
+    def __init__(self, samplerate=None, blocksize=None,
                  input_device=None, input_channels=None,
-                 input_dtype='float32', input_latency=None,
+                 input_dtype=None, input_latency=None,
                  output_device=None, output_channels=None,
-                 output_dtype='float32', output_latency=None,
+                 output_dtype=None, output_latency=None,
                  callback=None, finished_callback=None,
                  **flags):
         """Open a new stream.
@@ -694,8 +714,8 @@ class Stream(_StreamBase, _Reader, _Writer):
 
 
 class InputStream(_StreamBase, _Reader):
-    def __init__(self, samplerate=None, blocksize=0, device=None,
-                 channels=None, dtype='float32', latency=None,
+    def __init__(self, samplerate=None, blocksize=None, device=None,
+                 channels=None, dtype=None, latency=None,
                  callback=None, finished_callback=None, **flags):
         stream_parameters, self._input_channels, self._input_dtype, \
             samplerate = _setup_stream_parameters(
@@ -722,8 +742,8 @@ class InputStream(_StreamBase, _Reader):
 
 
 class OutputStream(_StreamBase, _Writer):
-    def __init__(self, samplerate=None, blocksize=0, device=None,
-                 channels=None, dtype='float32', latency=None,
+    def __init__(self, samplerate=None, blocksize=None, device=None,
+                 channels=None, dtype=None, latency=None,
                  callback=None, finished_callback=None, **flags):
         stream_parameters, self._output_channels, self._output_dtype, \
             samplerate = _setup_stream_parameters(
@@ -747,3 +767,63 @@ class OutputStream(_StreamBase, _Writer):
         self.channels = self._output_channels
         self.dtype = self._output_dtype.name
         self.latency = self._output_latency
+
+
+class init(object):
+
+    """Override default values for pysoundcard module."""
+
+    def _input_output_pair(input_name, output_name):
+        def getter(self):
+            value = getattr(self, input_name)
+            return value if value == getattr(self, output_name) else None
+
+        def setter(self, value):
+            setattr(self, input_name, value)
+            setattr(self, output_name, value)
+
+        doc = "Set %r and %r at once." % (input_name, output_name)
+        return property(getter, setter, doc=doc)
+
+    output_device = None
+    input_device = None
+    device = _input_output_pair('input_device', 'output_device')
+
+    output_channels = None
+    input_channels = None
+    channels = _input_output_pair('input_channels', 'output_channels')
+
+    output_dtype = 'float32'
+    input_dtype = 'float32'
+    dtype = _input_output_pair('input_dtype', 'output_dtype')
+
+    output_latency = 'low'
+    input_latency = 'low'
+    latency = _input_output_pair('input_latency', 'output_latency')
+
+    samplerate = None
+    blocksize = 0
+
+    clip_off = False
+    dither_off = False
+    never_drop_input = False
+    prime_output_buffers_using_stream_callback = False
+
+    def __getattr__(self, name):
+        """Raise error if non-existing attribute is requested."""
+        raise AttributeError("Invalid attribute: %s" % repr(name))
+
+    def __setattr__(self, name, value):
+        """Only allow setting existing attributes."""
+        if name in dir(self):
+            object.__setattr__(self, name, value)
+        else:
+            raise AttributeError("Invalid attribute: %s" % repr(name))
+
+    def reset(self):
+        """Reset all attributes to their default value."""
+        for attr in list(vars(self)):
+            delattr(self, attr)
+
+
+init = init()
