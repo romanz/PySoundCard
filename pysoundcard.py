@@ -669,7 +669,7 @@ class Stream(_StreamBase, _Reader, _Writer):
 
         if callback:
 
-            @ffi.callback("PaStreamCallback")
+            @ffi.callback("PaStreamCallback", error=abort_flag)
             def callback_stub(input_ptr, output_ptr, frames, time, status, _):
                 input = _get_buffer(input_ptr, frames, self._input_channels,
                                     self._input_dtype)
@@ -703,7 +703,7 @@ class InputStream(_StreamBase, _Reader):
 
         if callback:
 
-            @ffi.callback("PaStreamCallback")
+            @ffi.callback("PaStreamCallback", error=abort_flag)
             def callback_stub(input_ptr, output_ptr, frames, time, status, _):
                 data = _get_buffer(input_ptr, frames, self._input_channels,
                                    self._input_dtype)
@@ -731,7 +731,7 @@ class OutputStream(_StreamBase, _Writer):
 
         if callback:
 
-            @ffi.callback("PaStreamCallback")
+            @ffi.callback("PaStreamCallback", error=abort_flag)
             def callback_stub(input_ptr, output_ptr, frames, time, status, _):
                 data = _get_buffer(output_ptr, frames, self._output_channels,
                                    self._output_dtype)
