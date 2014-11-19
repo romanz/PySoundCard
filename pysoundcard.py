@@ -225,7 +225,7 @@ def hostapi_info(index=None):
         return (hostapi_info(i) for i in range(_pa.Pa_GetHostApiCount()))
     else:
         info = _pa.Pa_GetHostApiInfo(index)
-        if info == ffi.NULL:
+        if not info:
             raise RuntimeError("Invalid host API")
         assert info.structVersion == 1
         return {'name': ffi.string(info.name).decode(errors='ignore'),
@@ -242,7 +242,7 @@ def device_info(index=None):
         return (device_info(i) for i in range(_pa.Pa_GetDeviceCount()))
     else:
         info = _pa.Pa_GetDeviceInfo(index)
-        if info == ffi.NULL:
+        if not info:
             raise RuntimeError("Invalid device")
         assert info.structVersion == 2
 
@@ -331,7 +331,7 @@ class _StreamBase(object):
 
         # set some stream information
         info = _pa.Pa_GetStreamInfo(self._stream)
-        if info == ffi.NULL:
+        if not info:
             raise RuntimeError("Could not obtain stream info!")
         self._input_latency = info.inputLatency
         self._output_latency = info.outputLatency
