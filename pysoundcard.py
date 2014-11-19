@@ -294,7 +294,7 @@ class _StreamBase(object):
     """Base class for Stream, InputStream and OutputStream."""
 
     def __init__(self, stream_parameters_in, stream_parameters_out,
-                 samplerate, blocksize, finished_callback,
+                 samplerate, blocksize, callback, finished_callback,
                  clip_off=None, dither_off=None,
                  never_drop_input=None,
                  prime_output_buffers_using_stream_callback=None):
@@ -320,6 +320,46 @@ class _StreamBase(object):
         if prime_output_buffers_using_stream_callback:
             stream_flags |= 0x00000008
 
+        if not stream_parameters_out:
+            self.device = stream_parameters_in.device
+            self.channels = stream_parameters_in.channelCount
+
+            def callback_wrapper(input_ptr, output_ptr, frames,
+                                 time, status, _):
+                data = _get_buffer(input_ptr, frames, self.channels,
+                                   self.dtype)
+                return callback(data, _time_dict(time), status)
+
+        elif not stream_parameters_in:
+            self.device = stream_parameters_out.device
+            self.channels = stream_parameters_out.channelCount
+
+            def callback_wrapper(input_ptr, output_ptr, frames,
+                                 time, status, _):
+                data = _get_buffer(output_ptr, frames, self.channels,
+                                   self.dtype)
+                return callback(data, _time_dict(time), status)
+
+        else:
+            self.input_device = stream_parameters_in.device
+            self.output_device = stream_parameters_out.device
+            self.input_channels = stream_parameters_in.channelCount
+            self.output_channels = stream_parameters_out.channelCount
+
+            def callback_wrapper(input_ptr, output_ptr, frames,
+                                 time, status, _):
+                input = _get_buffer(input_ptr, frames, self.input_channels,
+                                    self.input_dtype)
+                output = _get_buffer(output_ptr, frames, self.output_channels,
+                                     self.output_dtype)
+                return callback(input, output, _time_dict(time), status)
+
+        if callback:
+            self._callback = ffi.callback(
+                "PaStreamCallback", callback_wrapper, error=abort_flag)
+        else:
+            self._callback = ffi.NULL
+
         self._stream = ffi.new("PaStream**")
         err = _pa.Pa_OpenStream(self._stream, stream_parameters_in,
                                 stream_parameters_out, samplerate, blocksize,
@@ -330,28 +370,32 @@ class _StreamBase(object):
         self._stream = self._stream[0]
 
         # set some stream information
+        self.blocksize = blocksize
         info = _pa.Pa_GetStreamInfo(self._stream)
         if not info:
             raise RuntimeError("Could not obtain stream info!")
-        self._input_latency = info.inputLatency
-        self._output_latency = info.outputLatency
         self.samplerate = info.sampleRate
-        self.blocksize = blocksize
+        if not stream_parameters_out:
+            self.latency = info.inputLatency
+        elif not stream_parameters_in:
+            self.latency = info.outputLatency
+        else:
+            self.input_latency = info.inputLatency
+            self.output_latency = info.outputLatency
 
         if finished_callback:
+
             @ffi.callback("PaStreamFinishedCallback")
-            def finished_callback_stub(userData):
-                finished_callback()
-            self._finished_callback = finished_callback_stub
+            def finished_callback_wrapper(userData):
+                return finished_callback()
+
+            self._finished_callback = finished_callback_wrapper
             err = _pa.Pa_SetStreamFinishedCallback(self._stream,
                                                    self._finished_callback)
             self._handle_error(err)
 
     # Avoid confusion if something goes wrong before assigning self._stream:
     _stream = ffi.NULL
-
-    # To be overwritten in derived classes if callback is requested:
-    _callback = ffi.NULL
 
     def _handle_error(self, err):
         # all error codes are negative:
@@ -474,8 +518,9 @@ class _StreamBase(object):
 
 class _Reader(object):
 
-    _input_channels = None
-    _input_dtype = None
+    def __init__(self, channels, dtype):
+        self._channels = channels
+        self._dtype = dtype
 
     def read_length(self):
         """The number of frames that can be written without waiting."""
@@ -493,20 +538,20 @@ class _Reader(object):
         with one column per channel is returned.
 
         """
-        num_bytes = (self._input_channels *
-                     self._input_dtype.itemsize * frames)
+        num_bytes = (self._channels * self._dtype.itemsize * frames)
         data = ffi.new("signed char[]", num_bytes)
         self._handle_error(_pa.Pa_ReadStream(self._stream, data, frames))
         if not raw:
-            data = np.frombuffer(ffi.buffer(data), dtype=self._input_dtype)
-            data.shape = frames, self._input_channels
+            data = np.frombuffer(ffi.buffer(data), dtype=self._dtype)
+            data.shape = frames, self._channels
         return data
 
 
 class _Writer(object):
 
-    _output_channels = None
-    _output_dtype = None
+    def __init__(self, channels, dtype):
+        self._channels = channels
+        self._dtype = dtype
 
     def write_length(self):
         """The number of frames that can be read without waiting."""
@@ -531,11 +576,10 @@ class _Writer(object):
 
         """
         frames = len(data)
-        channels = self._output_channels
+        channels = self._channels
 
-        if (not isinstance(data, np.ndarray) or
-                data.dtype != self._output_dtype):
-            data = np.array(data, dtype=self._output_dtype)
+        if (not isinstance(data, np.ndarray) or data.dtype != self._dtype):
+            data = np.array(data, dtype=self._dtype)
         if len(data.shape) == 1:
             # broadcast 1D arrays to (n,1) matrices
             data = np.asmatrix(data).T
@@ -547,7 +591,7 @@ class _Writer(object):
         if data.shape < (frames, channels):
             # if less data is available than requested, pad with zeros.
             tmp = data
-            data = np.zeros((frames, channels), dtype=self._output_dtype)
+            data = np.zeros((frames, channels), dtype=self._dtype)
             data[:tmp.shape[0], :tmp.shape[1]] = tmp
 
         data = data.ravel().tostring()
@@ -590,7 +634,7 @@ def _setup_stream_parameters(kind, device, channels, dtype, latency,
     stream_parameters = ffi.new(
         "PaStreamParameters*",
         (device, channels, sample_format, latency, ffi.NULL))
-    return stream_parameters, channels, dtype, samplerate
+    return stream_parameters, dtype, samplerate
 
 
 def _get_buffer(ptr, frames, channels, dtype):
@@ -673,100 +717,42 @@ class Stream(_StreamBase, _Reader, _Writer):
         and no return values.
 
         """
-        stream_parameters_in, self._input_channels, self._input_dtype, \
-            input_samplerate = _setup_stream_parameters(
-                'input', input_device, input_channels, input_dtype,
-                input_latency, samplerate)
-
-        stream_parameters_out, self._output_channels, self._output_dtype, \
-            output_samplerate = _setup_stream_parameters(
-                'output', output_device, output_channels, output_dtype,
-                output_latency, samplerate)
-
+        stream_parameters_in, self.input_dtype, input_samplerate = \
+            _setup_stream_parameters('input', input_device, input_channels,
+                                     input_dtype, input_latency, samplerate)
+        stream_parameters_out, self.output_dtype, output_samplerate = \
+            _setup_stream_parameters('output', output_device, output_channels,
+                                     output_dtype, output_latency, samplerate)
         if input_samplerate != output_samplerate:
             raise RuntimeError(
                 "Input and output device must have the same samplerate")
-
-        if callback:
-
-            @ffi.callback("PaStreamCallback", error=abort_flag)
-            def callback_stub(input_ptr, output_ptr, frames, time, status, _):
-                input = _get_buffer(input_ptr, frames, self._input_channels,
-                                    self._input_dtype)
-                output = _get_buffer(output_ptr, frames, self._output_channels,
-                                     self._output_dtype)
-                return callback(input, output, _time_dict(time), status)
-
-            self._callback = callback_stub
-
-        super(Stream, self).__init__(stream_parameters_in,
-                                     stream_parameters_out, input_samplerate,
-                                     blocksize, finished_callback, **flags)
-
-        self.input_device = stream_parameters_in.device
-        self.output_device = stream_parameters_out.device
-        self.input_channels = self._input_channels
-        self.output_channels = self._output_channels
-        self.input_dtype = self._input_dtype.name
-        self.output_dtype = self._output_dtype.name
-        self.input_latency = self._input_latency
-        self.output_latency = self._output_latency
+        _StreamBase.__init__(self, stream_parameters_in, stream_parameters_out,
+                             input_samplerate, blocksize, callback,
+                             finished_callback, **flags)
+        _Reader.__init__(self, self.input_channels, self.input_dtype)
+        _Writer.__init__(self, self.output_channels, self.output_dtype)
 
 
 class InputStream(_StreamBase, _Reader):
     def __init__(self, samplerate=None, blocksize=None, device=None,
                  channels=None, dtype=None, latency=None,
                  callback=None, finished_callback=None, **flags):
-        stream_parameters, self._input_channels, self._input_dtype, \
-            samplerate = _setup_stream_parameters(
-                'input', device, channels, dtype, latency, samplerate)
-
-        if callback:
-
-            @ffi.callback("PaStreamCallback", error=abort_flag)
-            def callback_stub(input_ptr, output_ptr, frames, time, status, _):
-                data = _get_buffer(input_ptr, frames, self._input_channels,
-                                   self._input_dtype)
-                return callback(data, _time_dict(time), status)
-
-            self._callback = callback_stub
-
-        super(InputStream, self).__init__(
-            stream_parameters, ffi.NULL,
-            samplerate, blocksize, finished_callback, **flags)
-
-        self.device = stream_parameters.device
-        self.channels = self._input_channels
-        self.dtype = self._input_dtype.name
-        self.latency = self._input_latency
+        stream_parameters, self.dtype, samplerate = _setup_stream_parameters(
+            'input', device, channels, dtype, latency, samplerate)
+        _StreamBase.__init__(self, stream_parameters, ffi.NULL, samplerate,
+                             blocksize, callback, finished_callback, **flags)
+        _Reader.__init__(self, self.channels, self.dtype)
 
 
 class OutputStream(_StreamBase, _Writer):
     def __init__(self, samplerate=None, blocksize=None, device=None,
                  channels=None, dtype=None, latency=None,
                  callback=None, finished_callback=None, **flags):
-        stream_parameters, self._output_channels, self._output_dtype, \
-            samplerate = _setup_stream_parameters(
-                'output', device, channels, dtype, latency, samplerate)
-
-        if callback:
-
-            @ffi.callback("PaStreamCallback", error=abort_flag)
-            def callback_stub(input_ptr, output_ptr, frames, time, status, _):
-                data = _get_buffer(output_ptr, frames, self._output_channels,
-                                   self._output_dtype)
-                return callback(data, _time_dict(time), status)
-
-            self._callback = callback_stub
-
-        super(OutputStream, self).__init__(
-            ffi.NULL, stream_parameters,
-            samplerate, blocksize, finished_callback, **flags)
-
-        self.device = stream_parameters.device
-        self.channels = self._output_channels
-        self.dtype = self._output_dtype.name
-        self.latency = self._output_latency
+        stream_parameters, self.dtype, samplerate = _setup_stream_parameters(
+            'output', device, channels, dtype, latency, samplerate)
+        _StreamBase.__init__(self, ffi.NULL, stream_parameters, samplerate,
+                             blocksize, callback, finished_callback, **flags)
+        _Writer.__init__(self, self.channels, self.dtype)
 
 
 class init(object):
